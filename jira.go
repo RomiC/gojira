@@ -1,126 +1,79 @@
+/*
+Small package providing following operations via JIRA REST API
+
+	Issues
+		* GetIssue — Get iformation about issue
+		* PostIssue — Add new issue
+*/
+
 package jira
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	// "fmt"
 	"io/ioutil"
 	"net/http"
-	"net/http/cookiejar"
 )
 
-type jira struct {
+const (
+	apiUri string = "/rest/api/2"
+	debug  bool   = false
+)
+
+type Jira struct {
 	Url      string
 	Login    string
 	Password string
 
-	Session string
-
 	Client *http.Client
-
-	Debug bool
 }
 
-var auth_uri string = "/rest/auth/latest/session"
-var api_uri string = "/rest/api/latest"
+// Jira constructor of jira-object
+func NewJira(url, login, password string) *Jira {
+	j := &Jira{Url: url, Login: login, Password: password}
 
-// Jira constructor
-func Jira(url, login, password string) (*jira, error) {
-	j := &jira{Url: url, Login: login, Password: password}
-	j.Debug = false
+	j.Client = &http.Client{}
 
-	cj, _ := cookiejar.New(new(cookiejar.Options))
-
-	j.Client = &http.Client{
-		Jar: cj,
-	}
-
-	err := j.auth()
-
-	if err != nil {
-		return nil, err
-	}
-
-	return j, nil
+	return j
 }
 
-type jiraResp struct {
-	Session       map[string]interface{}
-	ErrorMessages []string
-	Errors        json.RawMessage
-	Key           string
-	Fields        map[string]interface{}
-}
+// request is private method for making JIRA-requests
+// and parsing respons
+func (j *Jira) request(method, url, body string) ([]byte, error) {
+	bodyReader := bytes.NewBuffer([]byte(body))
 
-func (j *jira) request(req *http.Request) (*jiraResp, error) {
+	req, err := http.NewRequest(method, url, bodyReader)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(j.Login, j.Password)
+
 	resp, err := j.Client.Do(req)
 
 	if err != nil {
 		return nil, err
 	}
 
-	respStr, err := ioutil.ReadAll(resp.Body)
-
-	if j.Debug {
-		fmt.Printf(">> %s\n", req.URL)
-		fmt.Printf("<< %s\n\n", string(respStr))
+	if resp.StatusCode == 401 {
+		return []byte(""), &JiraError{req.URL.String(), body, "", "Authorization failed!"}
 	}
 
-	respObj := &jiraResp{}
-	err = json.Unmarshal(respStr, respObj)
+	respBytes, err := ioutil.ReadAll(resp.Body)
 
-	if err != nil {
-		return nil, err
-	}
-
-	if respObj.ErrorMessages != nil {
-		return nil, &JiraError{respObj.ErrorMessages[0]}
-	}
-
-	return respObj, nil
+	return respBytes, nil
 }
 
-func (j *jira) auth() error {
-	jsonStr := []byte(`{"username":"` + j.Login + `","password":"` + j.Password + `"}`)
-	req, _ := http.NewRequest("POST", j.Url+auth_uri, bytes.NewBuffer(jsonStr))
-	req.Header.Set("Content-Type", "application/json")
+// parse is private method for parsing JIRA API responses
+func (j *Jira) parse(resp []byte, obj JiraRespInterface) error {
+	err := json.Unmarshal(resp, &obj)
+	if err != nil {
+		return err
+	}
 
-	respObj, err := j.request(req)
+	err = obj.GetErrors()
 
 	if err != nil {
 		return err
 	}
 
-	j.Session = respObj.Session["value"].(string)
-
 	return nil
-}
-
-func (j *jira) GetIssue(issue string) (string, error) {
-	if j.Session == "" {
-		return "", &JiraError{Message: "Auth required!"}
-	}
-
-	req, _ := http.NewRequest("GET", j.Url+api_uri+"/issue/"+issue+"?fields=summary", nil)
-	req.AddCookie(&http.Cookie{Name: "JSESSIONID", Value: j.Session})
-	req.Header.Set("Content-Type", "application/json")
-
-	respObj, err := j.request(req)
-
-	if err != nil {
-		return "", err
-	}
-
-	var ret bytes.Buffer
-	fmt.Fprintf(&ret, "%s — %s", respObj.Key, respObj.Fields["summary"])
-
-	return ret.String(), nil
-}
-
-type JiraError struct {
-	Message string
-}
-
-func (je *JiraError) Error() string {
-	return je.Message
 }
